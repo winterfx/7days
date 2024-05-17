@@ -1,101 +1,52 @@
 package gee
 
 import (
+	"net/http"
 	"strings"
 	"sync"
 )
 
 type router struct {
-	methodsRouter map[method]*routerNode
+	methodsRouter map[method]*tireNode
 	mux           sync.Mutex
 }
 
-type routerNode struct {
-	partPattern string
-	handler     HandlerFunc
-	childNodes  []*routerNode
-	isWild      bool //':' or '*' is wild
+func (r *router) handle(ctx *Context) {
+	handler := r.searchHandler(ctx.getMethod(), ctx.getPath())
+	if handler != nil {
+		ctx.handlers = append(ctx.handlers, handler)
+	} else {
+		ctx.handlers = append(ctx.handlers, func(c *Context) {
+			c.String(http.StatusNotFound, "404 NOT FOUND")
+		})
+	}
+	ctx.Next()
 }
 
-func (r *routerNode) matchChild(newNode *routerNode) *routerNode {
-	for _, n := range r.childNodes {
-		if n.partPattern == newNode.partPattern || n.isWild {
-			return n
-		}
-	}
-	return nil
-}
-func (r *routerNode) matchChildren(part string) []*routerNode {
-	nodes := make([]*routerNode, 0)
-	for _, child := range r.childNodes {
-		if child.partPattern == part || child.isWild {
-			nodes = append(nodes, child)
-		}
-	}
-	return nodes
-}
-func (r *routerNode) insertNode(nodeList []*routerNode, height int) {
-	if height == len(nodeList) {
-		return
-	}
-	newNode := nodeList[height]
-	child := r.matchChild(newNode)
-	if child == nil {
-		r.childNodes = append(r.childNodes, newNode)
-	}
-	child.insertNode(nodeList, height+1)
-}
-func (r *routerNode) searchNode(path []string, height int) *routerNode {
-	if len(path) == height || strings.HasPrefix(r.partPattern, "*") {
-		return r
-	}
-	p := path[height]
-	children := r.matchChildren(p)
-
-	for _, child := range children {
-		result := child.searchNode(path, height+1)
-		if result != nil {
-			return result
-		}
-	}
-	return nil
-}
-
-func newRouterNode(partPattern string, handler HandlerFunc) *routerNode {
-	r := &routerNode{
-		partPattern: partPattern,
-		childNodes:  make([]*routerNode, 0),
-		handler:     handler,
-	}
-	if strings.HasPrefix(partPattern, ":") || strings.HasPrefix(partPattern, "*") {
-		r.isWild = true
-	}
-	return r
-}
 func (r *router) addRouter(m method, pattern string, handle HandlerFunc) {
-	//r.mux.Lock()
-	var rootN *routerNode
+	r.mux.Lock()
+	var rootN *tireNode
 	if root, ok := r.methodsRouter[m]; !ok {
 		//creat the root node
-		rootN = &routerNode{
-			childNodes: make([]*routerNode, 0),
+		rootN = &tireNode{
+			childNodes: make([]*tireNode, 0),
 		}
 		r.methodsRouter[m] = rootN
 	} else {
 		rootN = root
 	}
-	//r.mux.Unlock()
+	r.mux.Unlock()
 	pt := strings.Split(pattern, "/")
-	newNodeList := make([]*routerNode, 0)
+	newNodeList := make([]*tireNode, 0)
 	for i, p := range pt {
 		if len(p) == 0 {
 			continue
 		}
-		var newNode *routerNode
+		var newNode *tireNode
 		if i == len(pt)-1 {
-			newNode = newRouterNode(p, handle)
+			newNode = newtireNode(p, handle)
 		} else {
-			newNode = newRouterNode(p, nil)
+			newNode = newtireNode(p, nil)
 		}
 		newNodeList = append(newNodeList, newNode)
 	}
@@ -108,7 +59,7 @@ func (r *router) addRouter(m method, pattern string, handle HandlerFunc) {
 }
 func (r *router) searchHandler(m method, path string) HandlerFunc {
 	r.mux.Lock()
-	var rootN *routerNode
+	var rootN *tireNode
 	if root, ok := r.methodsRouter[m]; !ok {
 		return nil
 	} else {
@@ -129,5 +80,52 @@ func (r *router) searchHandler(m method, path string) HandlerFunc {
 	return nil
 }
 func newRouter() *router {
-	return &router{methodsRouter: make(map[method]*routerNode)}
+	return &router{methodsRouter: make(map[method]*tireNode)}
+}
+
+///////router group combine router//////////////
+
+type RouterGroup struct {
+	prefix      string // 支持叠加
+	middlewares []HandlerFunc
+	engine      *Engine
+	*router
+}
+
+func (r *RouterGroup) Group(prefix string) *RouterGroup {
+	newGroup := &RouterGroup{
+		prefix:      r.prefix + prefix,
+		router:      r.router,
+		middlewares: r.middlewares,
+		engine:      r.engine,
+	}
+	r.engine.groups = append(r.engine.groups, newGroup)
+	return newGroup
+}
+
+func (r *RouterGroup) Use(handler ...HandlerFunc) {
+	r.middlewares = append(r.middlewares, handler...)
+}
+func (r *RouterGroup) addRoute(method method, comp string, handler HandlerFunc) {
+	pattern := r.prefix + comp
+	r.router.addRouter(method, pattern, handler)
+}
+func (r *RouterGroup) getGroupMiddlewares() []HandlerFunc {
+	return r.middlewares
+}
+
+// GET defines the method to add GET request
+func (r *RouterGroup) GET(pattern string, handler HandlerFunc) {
+	r.addRoute(GET, pattern, handler)
+}
+
+// POST defines the method to add POST request
+func (r *RouterGroup) POST(pattern string, handler HandlerFunc) {
+	r.addRoute(POST, pattern, handler)
+}
+func newRouterGroup() *RouterGroup {
+	return &RouterGroup{
+		router:      newRouter(),
+		middlewares: make([]HandlerFunc, 0),
+	}
 }
