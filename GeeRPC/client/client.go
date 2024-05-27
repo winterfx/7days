@@ -1,4 +1,4 @@
-package geerpc
+package client
 
 import (
 	"encoding/json"
